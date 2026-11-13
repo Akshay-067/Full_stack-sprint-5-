@@ -1,11 +1,22 @@
 from sqlalchemy import Column, Integer, Float, String, create_engine, DateTime, func, ForeignKey
 from sqlalchemy.orm import Session, declarative_base
-from datetime import datetime
+from datetime import datetime, timedelta,timezone
+import jwt 
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
+from pydantic import BaseModel,Field
 
+
+ph=PasswordHasher()
 DB_PATH = "warehouse.db"
 engine = create_engine(f"sqlite:///{DB_PATH}")
 Base = declarative_base()
-
+USERNAME = "Akshay"
+PASSWORD = "akshay067"
+ACCESS_TOKEN_EXPIRE_MINUTES = 15
+REFRESH_TOKEN_EXPIRY=7*24*60
+SECRET_KEY ="SECRET067"
+ALGORITHM = "HS256"
 
 class Package(Base):
     __tablename__ = "packages"
@@ -14,7 +25,7 @@ class Package(Base):
     name = Column(String)
     destination = Column(String)
     weight = Column(Float)
-    arrival_date = Column(DateTime, default=datetime.today)
+    arrival_date = Column(DateTime, default=datetime.now)
     status = Column(String)
     batch_id = Column(Integer, ForeignKey("dispatch_batches.id"), nullable=True)
 
@@ -27,10 +38,18 @@ class DispatchBatch(Base):
     dispatch_date = Column(DateTime)
     status = Column(String)
 
+class User(Base):
+    __tablename__ = "users"
+
+    user_id = Column(Integer, primary_key=True)
+    user_name = Column(String)
+    password = Column(String)
+
+
 Base.metadata.create_all(engine)
 
 
-def add_package(name, destination, weight, arrival_date, status="pending"):
+def register_package(name, destination, weight, arrival_date, status="pending"):
     session = Session(engine)
     package = Package(name=name, destination=destination, weight=weight, arrival_date=arrival_date, status=status)
     session.add(package)
@@ -47,7 +66,7 @@ def add_package(name, destination, weight, arrival_date, status="pending"):
     return response
 
 
-def get_package(id):
+def get_one_package(id):
     session = Session(engine)
     package = session.query(Package).filter(Package.id == id).first()
     response = None
@@ -59,7 +78,7 @@ def get_package(id):
             "weight": package.weight,
             "arrival_date": package.arrival_date,
             "status": package.status,
-            "dispatch_id": package.dispatch_id
+            "batch_id": package.batch_id
         }
     session.close()
     return response
@@ -69,15 +88,15 @@ def update_package(id, name=None, destination=None, weight=None, arrival_date=No
     package = session.query(Package).filter(Package.id == id).first()
     response = None
     if package:
-        if name:
+        if name is not None:
             package.name = name
-        if destination:
+        if destination is not None:
             package.destination = destination
-        if weight:
+        if weight is not None:
             package.weight = weight
-        if arrival_date:
+        if arrival_date is not None:
             package.arrival_date = arrival_date
-        if status:
+        if status is not None:
             package.status = status
         session.commit()
         response = {
@@ -118,7 +137,7 @@ def get_all_packages(destination=None, status=None, arrival_date=None):
             "weight": package.weight,
             "arrival_date": package.arrival_date,
             "status": package.status,
-            "dispatch_id": package.dispatch_id
+            "batch_id": package.batch_id
         }
         response.append(temp_package)
     session.close()
@@ -171,9 +190,9 @@ def get_summary():
     return response
 
 
-def add_dispatch(vehicle, destination, dispatch_date):
+def add_dispatch(vehicle_number, destination, dispatch_date):
     session = Session(engine)
-    dispatch = DispatchBatch(vehicle=vehicle, destination=destination, dispatch_date=dispatch_date, status="scheduled")
+    dispatch = DispatchBatch(vehicle_number=vehicle_number, destination=destination, dispatch_date=dispatch_date, status="scheduled")
     session.add(dispatch)
     session.commit()
     packages = session.query(Package).filter(Package.destination == destination, Package.status == "pending").all()
@@ -183,7 +202,7 @@ def add_dispatch(vehicle, destination, dispatch_date):
     session.commit()
     response = {
         "id": dispatch.id,
-        "vehicle": dispatch.vehicle,
+        "vehicle_Number": dispatch.vehicle_number,
         "destination": dispatch.destination,
         "dispatch_date": dispatch.dispatch_date,
         "status": dispatch.status,
@@ -191,3 +210,57 @@ def add_dispatch(vehicle, destination, dispatch_date):
     }
     session.close()
     return response
+
+def verify_login(username, password):
+    session=Session(engine)
+    user=session.query(User).filter_by(user_name=username).first()
+    if user is None:
+        session.close()
+        return False
+    try:
+        ph.verify(user.password,password)
+    except VerifyMismatchError:
+        session.close()
+        return False
+    session.close()
+    access_token=create_token(username=username,token_type="access")
+    refresh_token=create_token(username=username,token_type="refresh")
+    return {"access_token":access_token,"refresh_token":refresh_token}
+        
+    
+    
+def create_token(username,token_type):
+    time=ACCESS_TOKEN_EXPIRE_MINUTES
+    if token_type == "refresh":
+        time=REFRESH_TOKEN_EXPIRY
+    payload = {
+        "username": username,
+        "token_type": token_type,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=time)
+
+    }
+    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return token
+
+def verify_token( token, token_type):
+    try:
+        payload = jwt.decode(jwt=token, key=SECRET_KEY, algorithms=[ALGORITHM])
+    except:
+        return False   
+    if payload["token_type"] == token_type:
+        return payload["username"]
+    return False
+
+
+
+def register_user(user_name:str,password:str):
+    session = Session(engine)
+    user_exists=session.query(User).filter_by(user_name=user_name).first()
+    if user_exists is not None:
+        session.close()
+        return False
+    session.add(User(user_name=user_name,password=ph.hash(password)))
+    session.commit()
+    session.close()
+    return True
+    
